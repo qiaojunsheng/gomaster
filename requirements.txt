@@ -1,0 +1,8 @@
+# Core dependencies
+Pillow>=9.0.0
+numpy>=1.21.0
+opencv-python>=4.5.0
+requests>=2.25.0
+
+# OCR (optional)
+rapidocr-onnxruntime>=1.2.0
