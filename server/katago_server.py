@@ -57,6 +57,7 @@ class AnalyzeRequest(BaseModel):
     max_visits: Optional[int] = None
     avoid_positions: Optional[List[Dict[str, int]]] = None  # 打劫时需要排除的位置
     playout_doubling_advantage: Optional[float] = None  # 必须在 -3 到 3 范围内
+    fast_mode: bool = False  # 快棋模式：只返回最佳落子，不进行胜率分析
 
 
 class AnalyzeResponse(BaseModel):
@@ -97,11 +98,15 @@ class ServerState:
         return models
         
     def _get_b28_model(self, models: List[Dict[str, str]]) -> Dict[str, str]:
-        """获取b28模型，如果没有则返回第一个"""
+        """获取b28模型，如果没有则返回b18，再没有则返回第一个"""
         for m in models:
             if 'b28' in m['name']:
                 return m
-        # 如果没有找到b28，返回第一个
+        # 如果没有找到b28，找b18
+        for m in models:
+            if 'b18' in m['name']:
+                return m
+        # 如果都没有，返回第一个
         if models:
             return models[0]
         raise Exception("没有找到可用的模型文件")
@@ -181,61 +186,90 @@ class ServerState:
             )
 
         start_time = time.time()
+        print(f"[分析请求] max_time={request.max_time}, fast_mode={request.fast_mode}, color={request.current_color}")
 
         try:
             with self.lock:  # 线程锁保护KataGo访问
                 current_stones = request.stones
-                
+
                 # 每次清空棋盘并重新设置所有棋子（不使用缓存）
                 self.katago_client.send_command("clear_board")
                 self._set_all_stones(current_stones)
 
-                # 处理打劫：如果提供了避免位置，使用get_recommended_moves获取多个推荐
-                recommended_move = None
-                recommended_moves = None
-                avoid_positions = request.avoid_positions
-
-                if avoid_positions:
-                    # 转换为 (row, col) 格式
-                    avoid_pos_list = [(p['y'], p['x']) for p in avoid_positions]
-                    moves = self.katago_client.get_recommended_moves(
-                        max_moves=5,
-                        avoid_positions=avoid_pos_list,
-                        max_time=request.max_time,
-                        current_color=request.current_color
+                # 快棋模式：使用 genmove 快速获取最佳落子，不进行详细分析
+                if request.fast_mode:
+                    best_move_coord = self.katago_client.genmove(
+                        request.current_color,
+                        fast_mode=True,
+                        max_time=request.max_time
                     )
-                    if moves:
-                        recommended_moves = []
-                        for m in moves:
-                            gtp = self.katago_client.coord_to_gtp(m['row'], m['col'])
-                            recommended_moves.append({
-                                'move': gtp,
-                                'winrate': m.get('winrate', 0),
-                                'visits': m.get('visits', 0),
-                                'scoreMean': m.get('scoreMean', 0)
-                            })
-                        recommended_move = recommended_moves[0]['move']
-                else:
-                    # 普通分析 - 使用 get_recommended_moves 获取推荐列表（包含胜率）
-                    moves = self.katago_client.get_recommended_moves(
-                        max_moves=5,
-                        max_time=request.max_time,
-                        current_color=request.current_color
-                    )
-                    if moves:
-                        recommended_moves = []
-                        for m in moves:
-                            gtp = self.katago_client.coord_to_gtp(m['row'], m['col'])
-                            recommended_moves.append({
-                                'move': gtp,
-                                'winrate': m.get('winrate', 0),
-                                'visits': m.get('visits', 0),
-                                'scoreMean': m.get('scoreMean', 0)
-                            })
-                        recommended_move = recommended_moves[0]['move']
+                    if best_move_coord and best_move_coord[0] is not None:
+                        # 将坐标转换为 GTP 格式
+                        best_move = self.katago_client.coord_to_gtp(best_move_coord[0], best_move_coord[1])
+                        # 只返回最佳落子，不包含胜率等信息
+                        recommended_moves = [{
+                            'move': best_move,
+                            'winrate': 0,
+                            'visits': 0,
+                            'scoreMean': 0
+                        }]
+                        recommended_move = best_move
                     else:
                         recommended_move = None
-                
+                        recommended_moves = None
+                else:
+                    # 普通模式：使用 kata-analyze 获取详细分析（包含胜率、目差等）
+                    # 处理打劫：如果提供了避免位置，使用get_recommended_moves获取多个推荐
+                    recommended_move = None
+                    recommended_moves = None
+                    avoid_positions = request.avoid_positions
+
+                    # 准备PDA参数
+                    pda_value = request.playout_doubling_advantage if request.playout_doubling_advantage is not None else 1.5
+
+                    if avoid_positions:
+                        # 转换为 (row, col) 格式
+                        avoid_pos_list = [(p['y'], p['x']) for p in avoid_positions]
+                        moves = self.katago_client.get_recommended_moves(
+                            max_moves=5,
+                            avoid_positions=avoid_pos_list,
+                            max_time=request.max_time,
+                            current_color=request.current_color,
+                            playout_doubling_advantage=pda_value
+                        )
+                        if moves:
+                            recommended_moves = []
+                            for m in moves:
+                                gtp = self.katago_client.coord_to_gtp(m['row'], m['col'])
+                                recommended_moves.append({
+                                    'move': gtp,
+                                    'winrate': m.get('winrate', 0),
+                                    'visits': m.get('visits', 0),
+                                    'scoreMean': m.get('scoreMean', 0)
+                                })
+                            recommended_move = recommended_moves[0]['move']
+                    else:
+                        # 普通分析 - 使用 get_recommended_moves 获取推荐列表（包含胜率）
+                        moves = self.katago_client.get_recommended_moves(
+                            max_moves=5,
+                            max_time=request.max_time,
+                            current_color=request.current_color,
+                            playout_doubling_advantage=pda_value
+                        )
+                        if moves:
+                            recommended_moves = []
+                            for m in moves:
+                                gtp = self.katago_client.coord_to_gtp(m['row'], m['col'])
+                                recommended_moves.append({
+                                    'move': gtp,
+                                    'winrate': m.get('winrate', 0),
+                                    'visits': m.get('visits', 0),
+                                    'scoreMean': m.get('scoreMean', 0)
+                                })
+                            recommended_move = recommended_moves[0]['move']
+                        else:
+                            recommended_move = None
+
                 # 不使用缓存
                 self.last_stones = None
 

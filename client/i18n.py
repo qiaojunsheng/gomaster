@@ -24,6 +24,8 @@ TRANSLATIONS = {
         'white': '白',
         'time': '思考时间',
         'board': '棋盘',
+        'fast_mode': '快棋',
+        'fast_mode_desc': '不显示胜率，只显示推荐落子',
         'waiting': '等待',
         'config': '配置',
         'save_settings': '保存设置',
@@ -100,7 +102,7 @@ TRANSLATIONS = {
         
         # Monitor
         'monitor_no_text': '[无文字]',
-        'monitor_text_prefix': '',
+        'monitor_text_prefix': '[手数]',
         
         # Errors
         'screenshot_failed': '截图失败',
@@ -131,6 +133,8 @@ TRANSLATIONS = {
         'white': 'W',
         'time': 'Think Time',
         'board': 'Board',
+        'fast_mode': 'Fast',
+        'fast_mode_desc': 'Hide winrate, show moves only',
         'waiting': 'Wait',
         'config': 'Config',
         'save_settings': 'Save',

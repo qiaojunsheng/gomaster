@@ -20,6 +20,31 @@ from datetime import datetime
 from pathlib import Path
 import requests
 
+# 设置日志文件
+LOG_FILE = "/Users/qiao/Desktop/qiao/program/GoMaster/client/debug.log"
+
+def log_debug(message):
+    """写入调试日志"""
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"[{timestamp}] {message}\n")
+            f.flush()
+    except Exception as e:
+        print(f"日志写入失败: {e}")
+
+def log_clear():
+    """清空日志文件"""
+    try:
+        with open(LOG_FILE, "w", encoding="utf-8") as f:
+            f.write("")
+    except:
+        pass
+
+# 清空旧日志
+log_clear()
+log_debug("=== GoMaster 客户端启动 ===")
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PIL import Image, ImageGrab, ImageTk, ImageDraw
@@ -28,6 +53,7 @@ import cv2
 
 from gbr_recognizer import GBRRecognizer
 from go_coordinates import array_to_gtp, gtp_to_array
+from go_board import GoBoard, Color, find_ko_threats
 from i18n import t, set_language, get_language, get_available_languages
 
 # 尝试导入 RapidOCR (v3.6.0+ 使用 rapidocr 包)
@@ -161,7 +187,7 @@ class GoClient:
         self.selected_color = tk.StringVar(value="B")
         self.show_visualization = tk.BooleanVar(value=False)
         self.human_like_thinking = tk.BooleanVar(value=False)  # 模拟人类思考开关
-        
+
         self.is_processing = False
         self.monitor_timer_id = None
         self.monitor_interval = 1.0
@@ -179,6 +205,8 @@ class GoClient:
         self.ko_excluded_last_turn = False  # 上一轮是否排除了打劫位置
         self.last_ko_move = None  # 上一次打劫位置
         self.last_ko_candidate_moves = None  # 保存打劫时的劫材列表用于可视化
+        # 规则引擎（用于准确检测打劫和查找劫材）
+        self.board_engine = GoBoard(size=19)  # 添加规则引擎
 
         self.config_file = Path(__file__).parent / 'client_config.json'
 
@@ -296,7 +324,7 @@ class GoClient:
                         self.monitor_region = tuple(saved['monitor_region'])
         except:
             pass
-            
+
     def _save_config(self):
         """保存配置"""
         try:
@@ -381,19 +409,29 @@ class GoClient:
     def _recognize_monitor_text(self) -> Optional[str]:
         """识别监控区域文字"""
         if not self.monitor_region or not self._rapidocr:
+            log_debug("[监控识别] 未配置监控区域或OCR未初始化")
             return None
 
         try:
             x, y, w, h = self.monitor_region
             if w <= 0 or h <= 0:
+                log_debug(f"[监控识别] 监控区域尺寸无效: {self.monitor_region}")
                 return None
 
             # 截取监控区域
+            log_debug(f"[监控识别] 截取区域: x={x}, y={y}, w={w}, h={h}")
             img = ImageGrab.grab(bbox=(x, y, x + w, y + h))
+            
+            # 保存截图用于调试
+            debug_path = "/Users/qiao/Desktop/qiao/program/GoMaster/client/screenshots/monitor_debug.png"
+            img.save(debug_path)
+            log_debug(f"[监控识别] 截图已保存到: {debug_path}")
+            
             img_array = np.array(img)
 
             # 使用 RapidOCR 识别 (适配 v3.6.0+ 和旧版本)
             result = self._rapidocr(img_array)
+            log_debug(f"[监控识别] OCR原始结果: {result}")
 
             # 提取所有识别到的文字
             texts = []
@@ -401,6 +439,13 @@ class GoClient:
                 # RapidOCR v3.6.0+ 返回 RapidOCROutput 对象
                 if hasattr(result, 'txts') and result.txts:
                     texts = [t for t in result.txts if t]
+                # 检查 word_results 字段 (有些版本使用这个字段)
+                elif hasattr(result, 'word_results') and result.word_results:
+                    for item in result.word_results:
+                        if isinstance(item, (list, tuple)) and len(item) >= 1:
+                            text = item[0]  # word_results 格式: (text, score, box)
+                            if text and text.strip():
+                                texts.append(text)
                 # 旧版本返回元组 (result_list, elapse)
                 elif isinstance(result, (list, tuple)) and len(result) >= 1:
                     result_list = result[0]
@@ -411,15 +456,21 @@ class GoClient:
                                 if text:
                                     texts.append(text)
 
+            log_debug(f"[监控识别] 提取到的文字: {texts}")
+
             if texts:
                 recognized_text = ' '.join(texts)
                 # 去除空格和换行
                 recognized_text = recognized_text.replace(' ', '').replace('\n', '').strip()
+                log_debug(f"[监控识别] 最终识别结果: '{recognized_text}'")
                 return recognized_text if recognized_text else None
 
+            log_debug("[监控识别] 未识别到任何文字")
             return None
         except Exception as e:
-            print(f"[OCR] 识别失败: {e}")
+            log_debug(f"[监控识别] 识别失败: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     def _is_my_turn(self, recognized_text: Optional[str]) -> bool:
@@ -430,17 +481,47 @@ class GoClient:
         selected_color = self.selected_color.get()  # "B" 或 "W"
         platform = self.config.get('platform', 'unknown')
         
+        log_debug(f"[轮次判断] 平台: {platform}, 选择颜色: {selected_color}, 识别文字: '{recognized_text}'")
+        
         # OGS 平台：只通过"您"字判断
         # OGS 界面会在轮到用户下棋时显示"您"
         if platform == 'ogs':
             if '您' in recognized_text:
+                log_debug("[轮次判断] OGS平台: 识别到'您', 轮到我方")
                 return True
             else:
+                log_debug("[轮次判断] OGS平台: 未识别到'您', 轮到对方")
                 return False
         
-        # 其他平台：通过手数奇偶性判断
+        # 弈城/野狐平台：直接识别数字（手数）进行奇偶性判断
+        # 这些平台的监控区域只显示纯数字手数
+        if platform in ['yicheng', 'fox']:
+            numbers = re.findall(r'\d+', recognized_text)
+            log_debug(f"[轮次判断] 弈城/野狐平台: 提取到的数字: {numbers}")
+            if numbers:
+                try:
+                    number = int(numbers[0])
+                    is_odd = (number % 2 == 1) and number != 0  # 0 作为偶数处理
+                    log_debug(f"[轮次判断] 手数: {number}, 奇数: {is_odd}")
+
+                    # 奇数+白棋 或 偶数（包括0）+黑棋 = 轮到自己
+                    if is_odd and selected_color == "W":
+                        log_debug("[轮次判断] 奇数+白棋 = 轮到我方")
+                        return True
+                    elif not is_odd and selected_color == "B":
+                        log_debug("[轮次判断] 偶数+黑棋 = 轮到我方")
+                        return True
+                    else:
+                        log_debug("[轮次判断] 不匹配 = 轮到对方")
+                        return False
+                except ValueError as e:
+                    log_debug(f"[轮次判断] 数字转换失败: {e}")
+                    pass
+            else:
+                log_debug("[轮次判断] 未识别到数字，默认允许")
+        
+        # 其他平台：通过手数奇偶性判断（需要包含"Move"或"手"字样）
         if 'Move' in recognized_text or '手' in recognized_text:
-            # OGS 英文界面或其他平台：通过手数奇偶性判断
             numbers = re.findall(r'\d+', recognized_text)
             if numbers:
                 try:
@@ -458,6 +539,7 @@ class GoClient:
                     pass
 
         # 默认允许（未识别到明确信息时）
+        log_debug("[轮次判断] 默认允许")
         return True
 
     def _recognize_monitor_text_cached(self) -> Optional[str]:
@@ -737,6 +819,28 @@ class GoClient:
             if hasattr(self, 'board_window') and self.board_window.winfo_exists():
                 self.board_window.destroy()
 
+    def _clear_result_canvas(self):
+        """清空结果显示区域"""
+        self.result_canvas.delete('all')
+        self.result_canvas_items = []
+
+    def _update_result_canvas_simple(self):
+        """简化显示结果"""
+        self._clear_result_canvas()
+        canvas_width = self.result_canvas.winfo_width()
+        canvas_height = self.result_canvas.winfo_height()
+        if canvas_width < 10:
+            canvas_width = 400
+        if canvas_height < 10:
+            canvas_height = 60
+        self.result_canvas.create_text(
+            canvas_width // 2, canvas_height // 2,
+            text=t('waiting_analysis'),
+            font=self.FONTS['body'],
+            fill=self.COLORS['text_secondary'],
+            anchor='c'
+        )
+
     def _start_monitor(self):
         """启动监控"""
         self._stop_monitor()
@@ -751,21 +855,21 @@ class GoClient:
     def _monitor_loop(self):
         """监控循环 - 每秒检查"""
         if self.auto_polling_enabled.get():
-            # 如果刚完成自动落子，需要等待1秒
+            # 如果刚完成自动落子，重置标记并立即分析（无等待）
             if self.just_clicked:
                 self.just_clicked = False
+            # 只有当前没有在处理时才进行分析
+            if not self.is_processing:
+                self._check_and_analyze()
             else:
-                # 只有当前没有在处理时才进行分析
-                if not self.is_processing:
-                    self._check_and_analyze()
-                else:
-                    print("[监控] 跳过分析：上一个请求仍在处理中")
-        
+                print("[监控] 跳过分析：上一个请求仍在处理中")
+
         # 每秒更新监控区域显示（无论是否分析）
         self._update_monitor_display()
-        
+
         # 只在轮巡启用时继续循环
         if self.auto_polling_enabled.get():
+            # 轮巡间隔1秒
             self.monitor_timer_id = self.root.after(1000, self._monitor_loop)
     
     def _update_monitor_display(self):
@@ -1008,35 +1112,6 @@ class GoClient:
                 self.root.after(0, lambda: self._update_result(t('no_stones_detected')))
                 return
 
-            # 计算棋面复杂度，动态调整等待时间（模仿人类思考时间）
-            complexity = self._calculate_board_complexity(stones)
-            # 根据是否启用"模拟人类思考"来决定等待时间
-            if self.human_like_thinking.get():
-                # 启用模拟人类思考：根据复杂度动态调整等待时间
-                # 复杂度 0-1 映射到基础等待时间 0.5-5 秒
-                base_wait_time = 0.5 + complexity * 4.5
-                
-                # 如果不是打劫，则根据复杂度等待，并加入随机性
-                potential_ko_move = self._get_potential_ko_move(black_stones, white_stones)
-                if potential_ko_move is None:
-                    # 在基础时间上加入 ±20% 的随机波动，模拟人类思考的不稳定性
-                    random_factor = random.uniform(0.8, 1.2)
-                    wait_time = base_wait_time * random_factor
-                    # 确保在 0.5-5 秒范围内
-                    wait_time = max(0.5, min(5.0, wait_time))
-                    print(f"[思考] 棋面复杂度: {complexity:.2f}, 基础等待: {base_wait_time:.1f}秒, 实际等待: {wait_time:.1f}秒")
-                    time.sleep(wait_time)
-                else:
-                    # 打劫时也加入小幅随机性
-                    wait_time = 0.5 * random.uniform(0.9, 1.1)
-                    print(f"[Thinking] {t('thinking_ko_detected')}: {wait_time:.1f}s")
-                    time.sleep(wait_time)
-            else:
-                # 未启用模拟人类思考：使用固定等待时间 0.5 秒
-                potential_ko_move = self._get_potential_ko_move(black_stones, white_stones)
-                print(f"[Thinking] Fixed wait time: 0.5s")
-                time.sleep(0.5)
-
             # 获取用户选择的颜色和当前实际轮到的一方
             user_color = self.selected_color.get()  # 用户选择执子颜色
             if user_color == "B":
@@ -1046,8 +1121,45 @@ class GoClient:
             else:
                 current_color = user_color
 
-            # 不使用排除位置，让 KataGo 正常推荐
-            response = self._request_analysis(black_stones, white_stones, current_color)
+            # 使用 Sabaki 风格的规则引擎检测打劫
+            ko_detection = self._detect_ko_with_engine(black_stones, white_stones, current_color)
+            potential_ko_move = None
+
+            # 判断是否需要排除打劫位置
+            # 围棋打劫规则：
+            # 1. 第一回合：检测到打劫，排除该位置，推荐劫材
+            # 2. 第二回合：对方应劫后，可以回提（不排除）
+            # 3. 形成循环时，重复上述过程
+            should_exclude_ko = False
+            avoid_pos = None
+
+            if ko_detection['is_ko']:
+                # 将打劫点坐标转换为 GTP 格式
+                ko_row, ko_col = ko_detection['ko_point']
+                potential_ko_move = self.board_engine.coord_to_gtp(ko_row, ko_col)
+
+                # 检查是否是同一个打劫点
+                is_same_ko = self.last_ko_move == potential_ko_move
+
+                if self.ko_excluded_last_turn and is_same_ko:
+                    # 上一轮已经排除过这个打劫点，这一轮可以正常回提
+                    print(f"[打劫] 上一轮已排除 {potential_ko_move}，本轮可以正常回提")
+                    # 重置状态，下次如果再形成同样打劫，需要重新排除
+                    self.ko_excluded_last_turn = False
+                else:
+                    # 新的打劫点，或者之前没有排除过，需要排除该位置
+                    should_exclude_ko = True
+                    avoid_pos = [{'x': ko_col, 'y': ko_row}]
+                    print(f"[打劫] 检测到打劫位置: {potential_ko_move}，已排除该位置进行推荐")
+            else:
+                # 没有检测到打劫，重置状态
+                if self.ko_excluded_last_turn or self.last_ko_move:
+                    print(f"[打劫] 打劫结束，重置状态")
+                    self.ko_excluded_last_turn = False
+                    self.last_ko_move = None
+
+            # 调用分析，如果需要则排除打劫位置
+            response = self._request_analysis(black_stones, white_stones, current_color, avoid_positions=avoid_pos)
 
             if response and response.get('success'):
                 move = response.get('recommended_move')
@@ -1055,50 +1167,23 @@ class GoClient:
                 self.last_recommended_move = move
                 self.last_recommended_moves = recommended_moves
 
-                # 检测打劫（基于返回的推荐是否包含打劫位置）
-                is_ko = potential_ko_move is not None and move == potential_ko_move
+                # 检测是否处于打劫状态（基于是否排除了打劫位置）
+                is_ko = should_exclude_ko and potential_ko_move is not None
 
-                # 判断是否需要排除打劫位置
-                # 规则：只在第一次检测到打劫时排除，下一轮可以正常下在打劫位置
-                should_exclude_ko = False
-                if is_ko and potential_ko_move:
-                    if self.ko_excluded_last_turn and self.last_ko_move == potential_ko_move:
-                        # 上一轮已经排除过这个位置，这一轮可以正常下
-                        print(f"[打劫] 上一轮已排除 {potential_ko_move}，本轮可以正常落子")
-                        is_ko = False  # 不视为打劫，正常落子
-                    else:
-                        # 第一次检测到打劫，需要排除
-                        should_exclude_ko = True
-                        print(f"[打劫] 检测到打劫位置: {potential_ko_move}，正在寻找替代位置...")
-
-                # 如果是打劫且需要排除，重新分析获取替代方案
+                # 如果是打劫（排除了打劫位置），KataGo返回的推荐就是劫材
                 ko_alternative_moves = []
-                if is_ko and should_exclude_ko and potential_ko_move:
-                    # 转换打劫位置为坐标
-                    try:
-                        ko_col_char = potential_ko_move[0].upper()
-                        ko_row_num = int(potential_ko_move[1:])
-                        ko_col = ord(ko_col_char) - ord('A')
-                        if ko_col >= 8:
-                            ko_col -= 1
-                        ko_row = 19 - ko_row_num
-                        # 重新分析，排除打劫位置
-                        avoid_pos = [{'x': ko_col, 'y': ko_row}]
-                        ko_response = self._request_analysis(black_stones, white_stones, current_color, avoid_positions=avoid_pos)
-                        if ko_response and ko_response.get('success'):
-                            ko_moves = ko_response.get('recommended_moves', [])
-                            for i, m in enumerate(ko_moves[:3]):  # 获取前3个替代位置
-                                ko_alternative_moves.append({
-                                    'rank': i + 1,
-                                    'move': m['move'],
-                                    'winrate': m['winrate']  # 使用原始胜率
-                                })
-                            print(f"[打劫] 找到 {len(ko_alternative_moves)} 个替代位置")
-                            # 记录状态：本轮排除了打劫位置
-                            self.ko_excluded_last_turn = True
-                            self.last_ko_move = potential_ko_move
-                    except Exception as e:
-                        print(f"[打劫] 获取替代位置失败: {e}")
+                if is_ko and potential_ko_move:
+                    # KataGo已经排除了打劫位置，返回的推荐就是劫材
+                    for i, m in enumerate(recommended_moves[:3]):  # 获取前3个替代位置
+                        ko_alternative_moves.append({
+                            'rank': i + 1,
+                            'move': m['move'],
+                            'winrate': m['winrate']  # 使用原始胜率
+                        })
+                    print(f"[打劫] KataGo已排除打劫位置，返回 {len(ko_alternative_moves)} 个劫材")
+                    # 记录状态：本轮排除了打劫位置
+                    self.ko_excluded_last_turn = True
+                    self.last_ko_move = potential_ko_move
 
                 # 获取目数差（scoreMean）- 当前下棋方视角
                 score_mean = recommended_moves[0].get('scoreMean', 0) if recommended_moves else 0
@@ -1119,20 +1204,43 @@ class GoClient:
                 
                 if is_ko:
                     self.ko_detected = True
+                    # 使用规则引擎查找劫材（增强版）
+                    engine_ko_threats = []
+                    try:
+                        engine_ko_threats = self._get_ko_threats_with_engine(
+                            black_stones, white_stones, current_color, min_value=0.15
+                        )
+                        if engine_ko_threats:
+                            print(f"[打劫] 规则引擎找到 {len(engine_ko_threats)} 个劫材")
+                    except Exception as e:
+                        print(f"[打劫] 规则引擎查找劫材失败: {e}")
+
                     # 打劫时显示打劫位置和替代方案（更规范整齐的格式）
                     msg_lines = ["╔════════════════════════════════════╗"]
                     msg_lines.append(f"║  ⚠️ 打劫警告  🚫 禁止落子: {potential_ko_move:<8}  ║")
                     msg_lines.append("╠════════════════════════════════════╣")
-                    
-                    # 显示替代位置（劫材）
-                    if ko_alternative_moves:
+
+                    # 显示替代位置（劫材）- 合并KataGo推荐和规则引擎结果
+                    if ko_alternative_moves or engine_ko_threats:
                         msg_lines.append("║  💡 推荐劫材:                      ║")
+
+                        # 显示KataGo推荐的劫材（带胜率）
                         for i, am in enumerate(ko_alternative_moves[:3]):
                             circle = ['🔴', '🟢', '🟡'][i] if i < 3 else '⚪'
                             msg_lines.append(f"║     {circle} {am['move']:<6} 胜率:{am['winrate']:>6.1f}%   ║")
+
+                        # 显示规则引擎找到的额外劫材（带价值评估）
+                        if engine_ko_threats:
+                            msg_lines.append("║  📊 规则引擎评估:                  ║")
+                            for i, (row, col, value) in enumerate(engine_ko_threats[:3]):
+                                gtp = self.board_engine.coord_to_gtp(row, col)
+                                # 避免重复显示
+                                if not any(am['move'] == gtp for am in ko_alternative_moves[:3]):
+                                    stars = '★' * int(value * 5)  # 0-5星评级
+                                    msg_lines.append(f"║     {gtp:<6} 价值:{value:.2f} {stars:<5}   ║")
                     else:
                         msg_lines.append("║  (暂无推荐劫材)                    ║")
-                    
+
                     msg_lines.append("╚════════════════════════════════════╝")
                     msg = "\n".join(msg_lines)
                     
@@ -1149,11 +1257,6 @@ class GoClient:
                         return
                 else:
                     self.ko_detected = False
-                    # 非打劫状态，重置打劫排除状态
-                    if self.ko_excluded_last_turn:
-                        print(f"[打劫] 重置状态，下一轮可以正常打劫")
-                        self.ko_excluded_last_turn = False
-                        self.last_ko_move = None
                     # 显示前三个推荐选项（一行显示）
                     if top_moves:
                         # 调试输出：查看实际返回的推荐
@@ -1246,9 +1349,11 @@ class GoClient:
                 'current_color': current_color,
                 'max_time': self.config.get('max_time', 5.0),
                 'max_visits': self.config.get('max_visits', 5000),
-                'playout_doubling_advantage': 3.0  # 最大3.0（必须在-3到3范围内）
+                # 白棋使用更高的PDA来对抗黑棋先手优势
+                'playout_doubling_advantage': 2.6 if current_color == 'W' else 1.5,
+                'fast_mode': False  # 快棋模式已移除，始终使用普通模式
             }
-            
+
             if avoid_positions:
                 data['avoid_positions'] = avoid_positions
             
@@ -1262,106 +1367,120 @@ class GoClient:
             print(f"请求失败: {e}")
             return None
 
-    def _detect_ko(self, move: Optional[str]) -> bool:
-        """检测打劫：当前推荐落子与历史落子中某手相同，且是交替出现
-        
-        真正的打劫特征：
-        - 同一位置被黑白双方交替占据
-        - 一方提子后，另一方马上提回
-        - 中间间隔1-2手
-        
-        Args:
-            move: 当前推荐的GTP坐标
-            
-        Returns:
-            True 表示检测到打劫，False 表示正常
+    def _sync_board_engine(self, black_stones: list, white_stones: list) -> GoBoard:
         """
-        if not move or move == 'PASS' or len(self.move_history) < 4:
-            return False
-        
-        # 检查最近6手是否有交替模式
-        recent_moves = self.move_history[-6:] if len(self.move_history) >= 6 else self.move_history
-        
-        # 查找当前推荐位置在历史上的位置
-        positions = []
-        for i, hist_move in enumerate(recent_moves):
-            if hist_move == move:
-                positions.append(i)
-        
-        # 需要至少出现2次，且间隔为1（交替模式）
-        if len(positions) >= 2:
-            # 检查是否是交替出现（间隔1手）
-            for i in range(len(positions) - 1):
-                gap = positions[i + 1] - positions[i]
-                # 间隔1表示交替（如：A下X，B下Y，A再下X）
-                if gap == 1:
-                    return True
-        
-        return False
+        将识别的棋子同步到 board_engine
+        参考 Sabaki 的棋盘构建方式
 
-    def _get_potential_ko_move(self, black_stones: list = None, white_stones: list = None) -> Optional[str]:
-        """获取可能打劫的位置
-        
-        真正的打劫特征：同一位置交替出现（间隔1手）
-        
         Args:
-            black_stones: 黑棋位置列表，用于排除已有棋子的位置
-            white_stones: 白棋位置列表，用于排除已有棋子的位置
-        
+            black_stones: 黑棋位置列表 [(row, col), ...]
+            white_stones: 白棋位置列表 [(row, col), ...]
+
         Returns:
-            GTP坐标字符串，如果检测到可能打劫则返回位置，否则返回None
+            构建好的 GoBoard 实例
         """
-        if len(self.move_history) < 4:
-            return None
-        
-        # 检查最近6手是否有交替模式
-        recent_moves = self.move_history[-6:] if len(self.move_history) >= 6 else self.move_history
-        
-        # 查找所有出现过的位置
-        from collections import defaultdict
-        move_positions = defaultdict(list)
-        for i, move in enumerate(recent_moves):
-            move_positions[move].append(i)
-        
-        # 找是否有位置出现2次以上且间隔为1（交替模式）
-        for move, positions in move_positions.items():
-            if len(positions) >= 2:
-                for i in range(len(positions) - 1):
-                    gap = positions[i + 1] - positions[i]
-                    if gap == 1:  # 间隔1表示交替
-                        # 检查该位置是否已有棋子
-                        if black_stones is not None and white_stones is not None:
-                            # 将GTP坐标转换为(row, col)
-                            coord = self._gtp_to_coord(move)
-                            if coord:
-                                row, col = coord
-                                # 检查是否在黑棋或白棋列表中
-                                if (row, col) in black_stones or (row, col) in white_stones:
-                                    # 该位置已有棋子，不是有效的打劫位置
-                                    continue
-                        return move
-        
-        return None
-    
-    def _gtp_to_coord(self, gtp: str) -> Optional[tuple]:
-        """将GTP坐标转换为(row, col)"""
-        if not gtp or len(gtp) < 2:
-            return None
-        try:
-            col_char = gtp[0].upper()
-            row_num = int(gtp[1:])
-            
-            col = ord(col_char) - ord('A')
-            if col >= 8:  # I列跳过
-                col -= 1
-            row = 19 - row_num
-            
-            if 0 <= row < 19 and 0 <= col < 19:
-                return (row, col)
-        except:
-            pass
-        return None
-            
+        # 创建新棋盘（Sabaki 风格：从空棋盘开始，按顺序落子）
+        board = GoBoard(size=19)
+
+        # 合并所有棋子并按某种顺序落子（这里简化处理，直接设置）
+        # 注意：这种方式会丢失打劫状态，因为没按顺序落子
+        for row, col in black_stones:
+            if board.get(row, col) == Color.EMPTY:
+                board.set(row, col, Color.BLACK)
+
+        for row, col in white_stones:
+            if board.get(row, col) == Color.EMPTY:
+                board.set(row, col, Color.WHITE)
+
+        self.board_engine = board
+        return board
+
+    def _build_board_from_history(self, moves: List[Tuple[int, int, Color]]) -> GoBoard:
+        """
+        从历史落子记录构建棋盘（更准确的打劫检测）
+        参考 Sabaki 的 getBoard 方法
+
+        Args:
+            moves: 落子历史 [(row, col, color), ...]
+
+        Returns:
+            构建好的 GoBoard 实例
+        """
+        board = GoBoard(size=19)
+
+        for row, col, color in moves:
+            if board.has(row, col) and board.get(row, col) == Color.EMPTY:
+                # 使用 make_move 来正确更新打劫状态
+                board = board.make_move(row, col, color)
+
+        self.board_engine = board
+        return board
+
+    def _detect_ko_with_engine(self, black_stones: list, white_stones: list, current_color: str) -> Dict[str, Any]:
+        """
+        使用规则引擎准确检测打劫状态（Sabaki 风格）
+
+        基于棋盘状态判断，而非历史记录
+
+        Args:
+            black_stones: 黑棋位置列表
+            white_stones: 白棋位置列表
+            current_color: 当前要下的一方 ('B' 或 'W')
+
+        Returns:
+            打劫状态字典
+        """
+        # 同步棋盘状态
+        board = self._sync_board_engine(black_stones, white_stones)
+
+        color = Color.BLACK if current_color == 'B' else Color.WHITE
+
+        # 首先尝试从 _ko_info 获取打劫信息（如果有落子历史）
+        ko_info = board.get_ko_info()
+        if ko_info['is_ko'] and ko_info['sign'] == color:
+            # 查找劫材
+            ko_threats = find_ko_threats(board, color, min_value=0.2)
+            return {
+                'is_ko': True,
+                'ko_point': ko_info['vertex'],
+                'ko_threats': ko_threats,
+                'forbidden_sign': color
+            }
+
+        # 如果没有历史记录，通过棋盘状态推断打劫
+        detected_ko = board.detect_ko_from_position(color)
+        if detected_ko['is_ko']:
+            # 查找劫材
+            ko_threats = find_ko_threats(board, color, min_value=0.2)
+            return {
+                'is_ko': True,
+                'ko_point': detected_ko['ko_point'],
+                'ko_threats': ko_threats,
+                'forbidden_sign': color
+            }
+
+        return {'is_ko': False}
+
+    def _get_ko_threats_with_engine(self, black_stones: list, white_stones: list, current_color: str, min_value: float = 0.2) -> List[Tuple[int, int, float]]:
+        """
+        使用规则引擎查找劫材（Sabaki 风格）
+
+        Args:
+            black_stones: 黑棋位置列表
+            white_stones: 白棋位置列表
+            current_color: 当前要下的一方 ('B' 或 'W')
+            min_value: 最小劫材价值
+
+        Returns:
+            劫材列表，每个元素为 (row, col, value)
+        """
+        # 同步棋盘状态
+        board = self._sync_board_engine(black_stones, white_stones)
+
+        # 查找劫材
+        color = Color.BLACK if current_color == 'B' else Color.WHITE
+        return find_ko_threats(board, color, min_value=min_value)
+
     def _auto_click(self, gtp_coord: str):
         """自动落子"""
         if not gtp_coord or gtp_coord == 'PASS':
@@ -1453,52 +1572,52 @@ class GoClient:
         # 清空 Canvas
         self.result_canvas.delete('all')
         self.result_canvas_items = []
-        
+
         # 获取 Canvas 尺寸
         self.result_canvas.update_idletasks()
         canvas_width = self.result_canvas.winfo_width()
         canvas_height = self.result_canvas.winfo_height()
-        
+
         if canvas_width < 10:
             canvas_width = 400
         if canvas_height < 10:
             canvas_height = 60
-        
+
         padding = 10
         line_height = 22
-        
+
         # 解析文本内容
         has_rec = '推荐落子' in text or t('recommended_moves') in text
         has_sep = '⎸' in text
-        
+
         if has_rec and has_sep:
             # 分离推荐部分和目数差
             parts = text.split('⎸')
             if len(parts) == 2:
                 rec_part = parts[0].strip()
                 score_part = parts[1].strip()
-                
+
                 # 解析推荐位置
                 import re
                 moves = re.findall(r'([🟥🟩🟨])([A-Z]\d+)\(([BW]):([\d.]+)%\)', rec_part)
                 colors_map = {'🟥': '#F44336', '🟩': '#4CAF50', '🟨': '#FFC107'}
-                
+
                 # 2x2 表格布局参数
                 cols = 2  # 2列
                 rows = 2  # 2行
                 cell_width = (canvas_width - padding * 2) // cols  # 每个格子宽度
                 cell_height = (canvas_height - 10) // rows  # 每个格子高度
-                
+
                 # 绘制2x2表格中的推荐
                 for i, (circle, pos, color, winrate) in enumerate(moves[:3]):  # 最多3个推荐
                     # 计算当前推荐在第几行第几列
                     row = i // cols
                     col = i % cols
-                    
+
                     # 计算格子中心位置
                     cell_x = padding + col * cell_width + cell_width // 2
                     cell_y = 5 + row * cell_height + cell_height // 2
-                    
+
                     # 绘制彩色圆角方块（居中）
                     box_size = 14
                     color_fill = colors_map.get(circle, '#999999')
@@ -1506,7 +1625,7 @@ class GoClient:
                     # 计算起始x位置（让整个推荐项居中）
                     item_width = box_size + 6 + 30 + 70  # 方块+间距+位置+胜率
                     start_x = cell_x - item_width // 2
-                    
+
                     x1, y1_box, x2, y2_box = start_x, cell_y - box_size//2, start_x + box_size, cell_y + box_size//2
                     self.result_canvas.create_polygon(
                         x1+r, y1_box, x2-r, y1_box, x2, y1_box+r, x2, y2_box-r, x2-r, y2_box, x1+r, y2_box, x1, y2_box-r, x1, y1_box+r,
@@ -1519,7 +1638,7 @@ class GoClient:
                         fill='white',
                         anchor='c'
                     )
-                    
+
                     # 位置文字
                     self.result_canvas.create_text(
                         start_x + box_size + 6, cell_y, text=pos,
@@ -1527,7 +1646,7 @@ class GoClient:
                         fill=self.COLORS['text_primary'],
                         anchor='w'
                     )
-                    
+
                     # 胜率
                     self.result_canvas.create_text(
                         start_x + box_size + 6 + 30, cell_y, text=f'({color}:{winrate}%)',
@@ -1535,7 +1654,7 @@ class GoClient:
                         fill=self.COLORS['text_secondary'],
                         anchor='w'
                     )
-                
+
                 # 在第4个格子（右下）显示目数差
                 last_cell_x = padding + 1 * cell_width + cell_width // 2
                 last_cell_y = 5 + 1 * cell_height + cell_height // 2
@@ -1544,7 +1663,7 @@ class GoClient:
                 self._draw_simple_text(padding, canvas_height // 2, text)
         else:
             self._draw_simple_text(padding, canvas_height // 2, text)
-    
+
     def _draw_score_part(self, x, y, score_part):
         """绘制目数差部分 - 缩小图标，明确显示黑白"""
         # 解析目数差并确定显示文字
@@ -2308,7 +2427,7 @@ class GoClient:
             print(f"可视化失败: {e}")
 
     def _draw_config_info(self):
-        """在棋盘底部绘制服务器配置和KataGo参数（包含目数权重、胜率权重、探索参数）"""
+        """在棋盘底部绘制服务器配置和KataGo参数（包含目数权重、胜率权重、探索参数、实际visits）"""
         try:
             # 获取配置信息（从客户端配置）
             visits = self.config.get('max_visits', 5000)
@@ -2321,12 +2440,23 @@ class GoClient:
                 threading.Thread(target=self._fetch_katago_config, daemon=True).start()
                 katago_config = {}
 
+            # 获取实际分析的visits数量
+            actual_visits = 0
+            recommended_moves = getattr(self, 'last_recommended_moves', [])
+            if recommended_moves and len(recommended_moves) > 0:
+                # 使用第一个推荐位置的visits作为实际访问次数
+                actual_visits = recommended_moves[0].get('visits', 0)
+
             # 构建显示文本
             # 第一行：基本参数
             config_items = [
                 ("V", visits),
                 ("T", f"{thinking_time}s")
             ]
+
+            # 添加实际visits数量（如果有）
+            if actual_visits > 0:
+                config_items.append(("实际V", actual_visits))
 
             # 添加关键KataGo参数（目数权重、胜率权重、探索参数）
             if katago_config:
@@ -2335,11 +2465,11 @@ class GoClient:
                 dsu = katago_config.get('dynamicScoreUtilityFactor', '-')
                 config_items.append(("胜率", wl))
                 config_items.append(("目数", dsu))
-                
+
                 # 探索参数
                 cpuct = katago_config.get('cpuctExploration', '-')
                 config_items.append(("探索", cpuct))
-                
+
                 # 线程数
                 threads = katago_config.get('numSearchThreads', '-')
                 config_items.append(("线程", threads))
@@ -3061,10 +3191,10 @@ class GoClient:
 
         language_frame = tk.Frame(lang_card, bg=self.COLORS['card'])
         language_frame.pack(fill=tk.X)
-        
+
         language_var = tk.StringVar(value=get_language())
         available_langs = get_available_languages()
-        
+
         for lang_code, lang_name in available_langs.items():
             tk.Radiobutton(
                 language_frame,

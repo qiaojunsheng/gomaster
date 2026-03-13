@@ -139,11 +139,11 @@ class KataGoGTPClient:
             self.response_thread.start()
             
             # 等待 KataGo 初始化（给时间让后端检测完成）
-            time.sleep(3)  # 增加等待时间
+            time.sleep(2)  # 快棋模式：减少等待时间
             
             # 如果还没有检测到后端，再等待一下
             if self.backend_detected is None:
-                time.sleep(2)
+                time.sleep(1)
                 if self.backend_detected is None:
                     print(f"[KataGo] ⚠️  未能从启动输出中检测到后端类型")
                     print(f"[KataGo] 提示: 请检查KataGo是否编译时启用了Metal后端")
@@ -282,8 +282,8 @@ class KataGoGTPClient:
         
         while time.time() - start_time < timeout:
             try:
-                line = self.response_queue.get(timeout=0.5)
-                
+                line = self.response_queue.get(timeout=0.2)  # 快棋模式：减少轮询间隔
+
                 if not line:
                     continue
                 
@@ -682,15 +682,16 @@ class KataGoGTPClient:
         # 禁用形势判断，避免额外的kata-analyze调用
         return None
     
-    def get_recommended_moves(self, max_moves: int = 5, fast_mode: bool = False, 
+    def get_recommended_moves(self, max_moves: int = 5, fast_mode: bool = False,
                               avoid_position: Optional[Tuple[int, int]] = None,
                               avoid_positions: Optional[list] = None,
                               max_time: Optional[float] = None,
                               max_visits: Optional[int] = None,
-                              current_color: Optional[str] = None) -> Optional[list]:
+                              current_color: Optional[str] = None,
+                              playout_doubling_advantage: Optional[float] = None) -> Optional[list]:
         """
         获取AI推荐的落子点（使用kata-analyze命令）
-        
+
         Args:
             max_moves: 最多返回的推荐落子点数量
             fast_mode: 是否使用快速模式（降低分析时间以加快速度）
@@ -698,7 +699,8 @@ class KataGoGTPClient:
             avoid_positions: 要排除的位置列表 [(row, col), ...]，用于打劫时排除多个打劫位置
             max_time: 最大思考时间（秒），如果提供则设置全局maxTime参数
             max_visits: 最大访问次数，如果提供则设置全局maxVisits参数
-        
+            playout_doubling_advantage: PDA值，用于调整KataGo的激进程度
+
         Returns:
             推荐落子点列表，每个元素为：
             {
@@ -732,16 +734,19 @@ class KataGoGTPClient:
                 except Exception as e:
                     print(f"[KataGo] ⚠️ 设置maxVisits失败: {e}")
             
-            # 设置 wideRootNoise 增加探索性，让KataGo在落后时更积极寻找翻盘机会
+            # 设置PDA让KataGo更积极地追求胜率
             try:
-                self.send_command('kata-set-param wideRootNoise 0.04', timeout=1.0)
-                print("[KataGo] 设置wideRootNoise=0.04（增加探索性）")
+                # 如果传入了 playout_doubling_advantage 参数，使用传入的值，否则默认1.5
+                pda_value = playout_doubling_advantage if playout_doubling_advantage is not None else 1.5
+                self.send_command(f'kata-set-param playoutDoublingAdvantage {pda_value}', timeout=1.0)
+                self.send_command(f'kata-set-param playoutDoublingAdvantagePla {"BLACK" if current_color == "B" else "WHITE"}', timeout=1.0)
+                print(f"[KataGo] 设置PDA={pda_value}（积极追求胜率）")
             except Exception as e:
-                print(f"[KataGo] ⚠️ 设置wideRootNoise失败: {e}")
+                print(f"[KataGo] ⚠️ 设置PDA失败: {e}")
             
-            # 轮巡间隔时间0.3秒（30 centiseconds）
-            # interval 单位是百分之一秒（centiseconds），30 = 0.3秒
-            analyze_command = f'kata-analyze {current_color} interval 30 maxmoves {max_moves} rootInfo true'
+            # 轮巡间隔时间0.2秒（20 centiseconds）
+            # interval 单位是百分之一秒（centiseconds），20 = 0.2秒
+            analyze_command = f'kata-analyze {current_color} interval 20 maxmoves {max_moves} rootInfo true'
             
             # 处理排除位置（支持单个或多个位置）
             positions_to_avoid = []
@@ -791,17 +796,19 @@ class KataGoGTPClient:
             
             # 读取流式响应
             start_time = time.time()
-            # 超时时间：如果提供了max_time，使用max_time+2秒；否则根据fast_mode决定
+            # 超时时间：如果提供了max_time，使用max_time+5秒；否则根据fast_mode决定
             if max_time is not None:
-                timeout = max_time + 2.0  # 比maxTime稍长，确保能读取完整响应
+                timeout = max_time + 5.0  # 比maxTime稍长，确保能读取完整响应
+                min_analysis_time = max_time  # 最小分析时间
             else:
-                timeout = 5.0 if fast_mode else 15.0  # 快速模式使用更短的超时时间，正常模式增加到15秒
+                timeout = 5.0 if fast_mode else 10.0
+                min_analysis_time = 2.0 if fast_mode else 6.0
             all_lines = []
             got_response_header = False
             
             while time.time() - start_time < timeout:
                 try:
-                    line = self.response_queue.get(timeout=0.5)
+                    line = self.response_queue.get(timeout=0.2)  # 快棋模式：减少轮询间隔
                     if not line:
                         continue
                     
@@ -813,21 +820,29 @@ class KataGoGTPClient:
                     if line.startswith('=') or line.startswith('?'):
                         parts = line[1:].strip().split(None, 1)
                         if parts and parts[0] == cmd_id_str:
+                            # 如果已经收到过响应头，且再次收到命令ID，说明是结束标记
+                            if got_response_header:
+                                # 结束标记（只有 =cmd_id 没有内容，或内容为空）
+                                if len(parts) == 1 or not parts[1].strip():
+                                    break
                             got_response_header = True
                             if line.startswith('?'):
                                 error_msg = parts[1] if len(parts) > 1 else "未知错误"
                                 raise RuntimeError(f"KataGo 分析错误: {error_msg}")
+                            # 如果 =cmd_id 后面跟着 info，提取info部分
+                            if len(parts) > 1 and parts[1].strip().startswith('info'):
+                                all_lines.append(parts[1].strip())
                             continue
                     
                     # 收集所有 info 行
                     if got_response_header:
                         if line.startswith('info'):
                             all_lines.append(line)
-                        elif line.startswith('=') or line.startswith('?'):
-                            break
                 
                 except queue.Empty:
-                    if got_response_header and all_lines:
+                    # 如果已经过了最小分析时间，且收到过响应头，结束读取
+                    elapsed = time.time() - start_time
+                    if got_response_header and all_lines and elapsed >= min_analysis_time:
                         break
                     continue
             
