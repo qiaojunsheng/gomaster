@@ -22,6 +22,24 @@ A Go AI assistant based on KataGo, supporting screenshot recognition, automatic 
 - **轮巡监控 / Polling Monitor**: 自动检测棋盘变化，智能判断是否轮到自己
   - Automatically detect board changes and intelligently determine when it's your turn
 
+## 演示视频 / Demo Video
+
+### 功能演示
+
+[![GoMaster 功能演示](https://img.youtube.com/vi/dQw4w9WgXcQ/0.jpg)](https://github.com/qiaojunsheng/gomaster/blob/main/client/screenshots/3月4日.mp4)
+
+点击上方图片观看演示视频，展示 GoMaster 的主要功能：
+- 棋盘识别
+- AI 分析
+- 自动落子
+- 多平台支持
+
+Click the image above to watch the demo video, showcasing GoMaster's main features:
+- Board recognition
+- AI analysis
+- Auto-play
+- Multi-platform support
+
 ## 项目结构 / Project Structure
 
 ```
