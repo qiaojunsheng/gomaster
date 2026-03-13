@@ -61,7 +61,7 @@ GoMaster/
 ### 1. 克隆项目 / Clone the repository
 
 ```bash
-git clone https://github.com/yourusername/GoMaster.git
+git clone https://github.com/qiaojunsheng/gomaster.git
 cd GoMaster
 ```
 
@@ -207,9 +207,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 贡献指南 / Contributing
 
-欢迎提交 Issue 和 Pull Request！请阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 了解如何参与贡献。
+欢迎提交 Issue 和 Pull Request！
 
-Issues and Pull Requests are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) to learn how to contribute.
+Issues and Pull Requests are welcome!
 
 ## 致谢 / Acknowledgments
 
