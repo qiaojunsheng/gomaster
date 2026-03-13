@@ -7,6 +7,11 @@
 
 A Go AI assistant based on KataGo, supporting screenshot recognition, automatic move placement, and real-time analysis.
 
+## 语言版本 / Language Versions
+
+- [中文版本 / Chinese Version](README_CN.md)
+- [English Version](README_EN.md)
+
 ## 功能特点 / Features
 
 - **多平台支持 / Multi-platform**: 兼容腾讯围棋、野狐围棋、弈城、OGS、新浪围棋、99围棋等主流对弈平台
@@ -26,25 +31,21 @@ A Go AI assistant based on KataGo, supporting screenshot recognition, automatic 
 
 ### 功能演示
 
-[![GoMaster 功能演示](https://img.youtube.com/vi/dQw4w9WgXcQ/0.jpg)](https://github.com/qiaojunsheng/gomaster/blob/main/client/screenshots/3月4日.mp4)
+**视频下载链接 / Video Download Link:** [GoMaster 功能演示 / GoMaster Demo Video](https://github.com/qiaojunsheng/gomaster/raw/main/client/screenshots/3月4日.mp4)
 
-点击上方图片观看演示视频，展示 GoMaster 的主要功能：
-- 棋盘识别
-- AI 分析
-- 自动落子
-- 多平台支持
-
-Click the image above to watch the demo video, showcasing GoMaster's main features:
-- Board recognition
-- AI analysis
-- Auto-play
-- Multi-platform support
+**视频内容 / Video Content:**
+- 棋盘识别 / Board recognition
+- AI 分析 / AI analysis
+- 自动落子 / Auto-play
+- 多平台支持 / Multi-platform support
 
 ## 项目结构 / Project Structure
 
 ```
 GoMaster/
-├── README.md                   # 项目说明文档 / Project documentation
+├── README.md                   # 项目说明文档（双语）/ Project documentation (Bilingual)
+├── README_CN.md                # 项目说明文档（中文）/ Project documentation (Chinese)
+├── README_EN.md                # 项目说明文档（英文）/ Project documentation (English)
 ├── LICENSE                     # 许可证 / License
 ├── .gitignore                  # Git忽略配置 / Git ignore configuration
 ├── requirements.txt            # Python依赖 / Python dependencies
