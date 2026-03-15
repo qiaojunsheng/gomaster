@@ -53,7 +53,7 @@ import cv2
 
 from gbr_recognizer import GBRRecognizer
 from go_coordinates import array_to_gtp, gtp_to_array
-from go_board import GoBoard, Color, find_ko_threats
+from go_board import GoBoard, Color, find_ko_threats, find_ko_resolution_moves
 from i18n import t, set_language, get_language, get_available_languages
 
 # 尝试导入 RapidOCR (v3.6.0+ 使用 rapidocr 包)
@@ -192,7 +192,9 @@ class GoClient:
         self.monitor_timer_id = None
         self.monitor_interval = 1.0
         self.last_recommended_move = None
-        self.last_recommended_moves = None  # 多个推荐落子
+        self.last_recommended_moves = None
+        self.last_recommended_move_count = 0
+        self.excluded_recommended_moves = []  # 多个推荐落子
         self.last_board_info = None  # 保存 board_edges 和 board_spacing（仅用于当前次点击）
         self.last_stones = None  # 上一次识别的棋盘
         self._rapidocr = None
@@ -1095,6 +1097,11 @@ class GoClient:
             white_stones = stones.get('white', [])
 
             # 保存棋盘信息用于可视化
+            if self.last_stones and stones == self.last_stones and self.last_recommended_move:
+                if self.last_recommended_move not in self.excluded_recommended_moves:
+                    self.excluded_recommended_moves.append(self.last_recommended_move)
+                    print(f"[打劫] 第一次推荐无法落子，判定为打劫位置: {self.last_recommended_move}")
+            
             self.last_stones = stones
             self.last_board_info = {
                 'board_edges': stones.get('board_edges'),
@@ -1121,44 +1128,17 @@ class GoClient:
             else:
                 current_color = user_color
 
-            # 使用 Sabaki 风格的规则引擎检测打劫
-            ko_detection = self._detect_ko_with_engine(black_stones, white_stones, current_color)
-            potential_ko_move = None
-
-            # 判断是否需要排除打劫位置
-            # 围棋打劫规则：
-            # 1. 第一回合：检测到打劫，排除该位置，推荐劫材
-            # 2. 第二回合：对方应劫后，可以回提（不排除）
-            # 3. 形成循环时，重复上述过程
-            should_exclude_ko = False
+            # 准备排除位置列表
+            # 如果上次推荐无法落子（棋盘未变化），则排除该位置
             avoid_pos = None
+            if self.excluded_recommended_moves:
+                avoid_pos = []
+                for ex_move in self.excluded_recommended_moves:
+                    row, col = self.board_engine.gtp_to_coord(ex_move)
+                    avoid_pos.append({'x': col, 'y': row})
+                print(f"[打劫] 排除位置: {self.excluded_recommended_moves}")
 
-            if ko_detection['is_ko']:
-                # 将打劫点坐标转换为 GTP 格式
-                ko_row, ko_col = ko_detection['ko_point']
-                potential_ko_move = self.board_engine.coord_to_gtp(ko_row, ko_col)
-
-                # 检查是否是同一个打劫点
-                is_same_ko = self.last_ko_move == potential_ko_move
-
-                if self.ko_excluded_last_turn and is_same_ko:
-                    # 上一轮已经排除过这个打劫点，这一轮可以正常回提
-                    print(f"[打劫] 上一轮已排除 {potential_ko_move}，本轮可以正常回提")
-                    # 重置状态，下次如果再形成同样打劫，需要重新排除
-                    self.ko_excluded_last_turn = False
-                else:
-                    # 新的打劫点，或者之前没有排除过，需要排除该位置
-                    should_exclude_ko = True
-                    avoid_pos = [{'x': ko_col, 'y': ko_row}]
-                    print(f"[打劫] 检测到打劫位置: {potential_ko_move}，已排除该位置进行推荐")
-            else:
-                # 没有检测到打劫，重置状态
-                if self.ko_excluded_last_turn or self.last_ko_move:
-                    print(f"[打劫] 打劫结束，重置状态")
-                    self.ko_excluded_last_turn = False
-                    self.last_ko_move = None
-
-            # 调用分析，如果需要则排除打劫位置
+            # 调用分析，传入需要排除的位置
             response = self._request_analysis(black_stones, white_stones, current_color, avoid_positions=avoid_pos)
 
             if response and response.get('success'):
@@ -1167,12 +1147,13 @@ class GoClient:
                 self.last_recommended_move = move
                 self.last_recommended_moves = recommended_moves
 
-                # 检测是否处于打劫状态（基于是否排除了打劫位置）
-                is_ko = should_exclude_ko and potential_ko_move is not None
+                # 判断是否处于打劫状态：有排除的位置且KataGo返回了推荐
+                is_ko = len(self.excluded_recommended_moves) > 0 and len(recommended_moves) > 0
+                potential_ko_move = self.excluded_recommended_moves[0] if self.excluded_recommended_moves else None
 
-                # 如果是打劫（排除了打劫位置），KataGo返回的推荐就是劫材
+                # 如果是打劫状态，KataGo返回的推荐就是劫材
                 ko_alternative_moves = []
-                if is_ko and potential_ko_move:
+                if is_ko:
                     # KataGo已经排除了打劫位置，返回的推荐就是劫材
                     for i, m in enumerate(recommended_moves[:3]):  # 获取前3个替代位置
                         ko_alternative_moves.append({
@@ -1180,10 +1161,7 @@ class GoClient:
                             'move': m['move'],
                             'winrate': m['winrate']  # 使用原始胜率
                         })
-                    print(f"[打劫] KataGo已排除打劫位置，返回 {len(ko_alternative_moves)} 个劫材")
-                    # 记录状态：本轮排除了打劫位置
-                    self.ko_excluded_last_turn = True
-                    self.last_ko_move = potential_ko_move
+                    print(f"[打劫] 已排除 {potential_ko_move}，KataGo返回 {len(ko_alternative_moves)} 个劫材")
 
                 # 获取目数差（scoreMean）- 当前下棋方视角
                 score_mean = recommended_moves[0].get('scoreMean', 0) if recommended_moves else 0
@@ -1204,14 +1182,33 @@ class GoClient:
                 
                 if is_ko:
                     self.ko_detected = True
-                    # 使用规则引擎查找劫材（增强版）
+                    # 使用规则引擎查找劫材和消劫点
                     engine_ko_threats = []
+                    ko_resolution_moves = []
                     try:
+                        # 1. 先查找能够消劫的位置（提掉对方相邻棋子）
+                        board = self._sync_board_engine(black_stones, white_stones)
+                        color = Color.BLACK if current_color == 'B' else Color.WHITE
+                        
+                        # 将打劫位置从GTP转换为坐标
+                        ko_gtp = potential_ko_move
+                        ko_coord = self.board_engine.gtp_to_coord(ko_gtp)  # (row, col)
+                        
+                        # 查找消劫点
+                        ko_resolution_moves = find_ko_resolution_moves(board, color, ko_coord)
+                        if ko_resolution_moves:
+                            print(f"[打劫] 找到 {len(ko_resolution_moves)} 个消劫选点（可提子消劫）")
+                            # 只取前3个最佳消劫点
+                            ko_resolution_moves = ko_resolution_moves[:3]
+                        
+                        # 2. 再查找普通劫材
                         engine_ko_threats = self._get_ko_threats_with_engine(
-                            black_stones, white_stones, current_color, min_value=0.15
+                            black_stones, white_stones, current_color, min_value=0.05
                         )
                         if engine_ko_threats:
                             print(f"[打劫] 规则引擎找到 {len(engine_ko_threats)} 个劫材")
+                            # 只取前5个最有价值的劫材
+                            engine_ko_threats = engine_ko_threats[:5]
                     except Exception as e:
                         print(f"[打劫] 规则引擎查找劫材失败: {e}")
 
@@ -1219,6 +1216,15 @@ class GoClient:
                     msg_lines = ["╔════════════════════════════════════╗"]
                     msg_lines.append(f"║  ⚠️ 打劫警告  🚫 禁止落子: {potential_ko_move:<8}  ║")
                     msg_lines.append("╠════════════════════════════════════╣")
+
+                    # 显示消劫选点（最高优先级）
+                    if ko_resolution_moves:
+                        msg_lines.append("║  🔥 消劫选点（可提子消劫）:        ║")
+                        for i, (row, col, value) in enumerate(ko_resolution_moves[:2]):
+                            gtp = self.board_engine.coord_to_gtp(row, col)
+                            action = "提子消劫!" if value > 0.8 else "可提子"
+                            msg_lines.append(f"║     {'🔴' if i==0 else '🟢'} {gtp:<6} 价值:{value:.2f} {action:<8} ║")
+                        msg_lines.append("╠════════════════════════════════════╣")
 
                     # 显示替代位置（劫材）- 合并KataGo推荐和规则引擎结果
                     if ko_alternative_moves or engine_ko_threats:
@@ -1238,7 +1244,7 @@ class GoClient:
                                 if not any(am['move'] == gtp for am in ko_alternative_moves[:3]):
                                     stars = '★' * int(value * 5)  # 0-5星评级
                                     msg_lines.append(f"║     {gtp:<6} 价值:{value:.2f} {stars:<5}   ║")
-                    else:
+                    elif not ko_resolution_moves:
                         msg_lines.append("║  (暂无推荐劫材)                    ║")
 
                     msg_lines.append("╚════════════════════════════════════╝")
@@ -1248,13 +1254,41 @@ class GoClient:
                     self.root.after(0, lambda: self.turn_label.config(text=t('my_turn'), fg=self.COLORS['success']))
                     self.root.after(0, lambda: self._update_result(msg))
                     
-                    # 打劫时自动选择第一个替代位置（如果有）
-                    if ko_alternative_moves and self.auto_polling_enabled.get():
-                        self._auto_click(ko_alternative_moves[0]['move'])
-                        self.just_clicked = True
-                        return
-                    elif self.auto_polling_enabled.get():
-                        return
+                    # 打劫时自动选择最佳劫材或消劫点
+                    if self.auto_polling_enabled.get():
+                        best_move = None
+                        move_source = None
+                        
+                        # 1. 优先选择消劫点（能够提子消劫的位置）
+                        if ko_resolution_moves:
+                            best_resolution = ko_resolution_moves[0]
+                            best_move = self.board_engine.coord_to_gtp(best_resolution[0], best_resolution[1])
+                            move_source = f"消劫点(价值:{best_resolution[2]:.2f})"
+                            print(f"[打劫] 优先选择消劫点: {best_move} (价值:{best_resolution[2]:.2f})")
+                        
+                        # 2. 如果没有消劫点，选择KataGo推荐的劫材
+                        if not best_move and ko_alternative_moves:
+                            best_move = ko_alternative_moves[0]['move']
+                            move_source = "KataGo推荐"
+                            print(f"[打劫] 自动选择KataGo推荐劫材: {best_move}")
+                        
+                        # 3. 如果规则引擎找到高价值劫材，优先使用
+                        if not best_move and engine_ko_threats:
+                            best_threat = engine_ko_threats[0]
+                            # 如果规则引擎找到的劫材价值很高（>0.5），优先使用
+                            if best_threat[2] > 0.5:
+                                best_move = self.board_engine.coord_to_gtp(best_threat[0], best_threat[1])
+                                move_source = f"规则引擎(价值:{best_threat[2]:.2f})"
+                                print(f"[打劫] 优先选择规则引擎找到的高价值劫材: {best_move} (价值:{best_threat[2]:.2f})")
+                        
+                        if best_move:
+                            print(f"[打劫] 最终选择: {best_move} (来源: {move_source})")
+                            self._auto_click(best_move)
+                            self.just_clicked = True
+                            return
+                        else:
+                            print("[打劫] 未找到合适的劫材，等待手动处理")
+                            return
                 else:
                     self.ko_detected = False
                     # 显示前三个推荐选项（一行显示）
@@ -1557,6 +1591,10 @@ class GoClient:
                 click_y = y + row * cell_h
 
             pyautogui.doubleClick(click_x, click_y)
+            
+            # 落子成功后清空排除列表
+            self.excluded_recommended_moves = []
+            print(f"[自动落子] 成功落子 {gtp_coord}，清空排除列表")
             
         except Exception as e:
             print(f"自动落子失败: {e}")

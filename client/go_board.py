@@ -478,14 +478,15 @@ class GoBoard:
 
 def find_ko_threats(board: GoBoard, color: Color, min_value: float = 0.1) -> List[Tuple[int, int, float]]:
     """
-    查找可能的劫材位置
+    查找可能的劫材位置 - 优化版
     基于 Sabaki 风格的棋盘分析
 
-    劫材的定义：
-    1. 能够威胁对方大块棋子的位置
-    2. 能够破坏对方眼形的位置
-    3. 能够切断对方棋子的位置
-    4. 能够吃掉对方棋子的位置
+    劫材的定义（按优先级排序）：
+    1. 能够直接提子（吃子）- 最高优先级
+    2. 能够威胁对方大块棋子（使其只剩1-2气）
+    3. 能够破坏对方眼形
+    4. 能够切断对方棋子
+    5. 能够形成己方眼形或扩大地盘
 
     Args:
         board: 棋盘实例
@@ -497,6 +498,13 @@ def find_ko_threats(board: GoBoard, color: Color, min_value: float = 0.1) -> Lis
     """
     threats = []
     opponent = color.opponent()
+    
+    # 首先收集所有对方棋子位置，优先在对方棋子附近搜索
+    opponent_stones = []
+    for r in range(board.size):
+        for c in range(board.size):
+            if board.get(r, c) == opponent:
+                opponent_stones.append((r, c))
 
     for r in range(board.size):
         for c in range(board.size):
@@ -508,41 +516,180 @@ def find_ko_threats(board: GoBoard, color: Color, min_value: float = 0.1) -> Lis
             if analysis['ko'] or analysis['overwrite']:
                 continue
 
-            # 模拟落子
-            test_board = board.make_move(r, c, color)
-
             value = 0.0
+            is_high_priority = False
 
-            # 1. 能够提子（直接吃掉对方棋子）- 高价值劫材
+            # 1. 能够提子（直接吃掉对方棋子）- 最高价值劫材
             if analysis['capturing']:
-                # 计算提子数量
+                # 模拟落子计算提子数量
+                test_board = board.make_move(r, c, color)
                 captured_diff = test_board.get_captures(color) - board.get_captures(color)
                 if captured_diff > 0:
-                    value += min(captured_diff * 0.2, 0.8)  # 最多0.8
+                    # 提子数量越多价值越高，最低也有0.5的基础价值
+                    value += 0.5 + min(captured_diff * 0.1, 0.5)  # 0.5-1.0
+                    is_high_priority = True
 
-            # 2. 能够威胁对方大块棋子（减少对方棋子的气）
+            # 2. 能够威胁对方大块棋子（使其只剩1-2气）
             threatened_stones = _count_threatened_stones(board, r, c, color)
-            if threatened_stones > 5:
-                value += min(threatened_stones * 0.05, 0.6)  # 最多0.6
+            if threatened_stones > 3:
+                # 威胁的棋子越多价值越高
+                value += min(threatened_stones * 0.08, 0.7)  # 最多0.7
+                if threatened_stones > 10:
+                    is_high_priority = True
 
-            # 3. 能够破坏对方眼形
+            # 3. 能够破坏对方眼形 - 中等价值
             if _is_eye_breaking_move(board, r, c, color):
-                value += 0.4
+                value += 0.35
 
             # 4. 能够切断对方棋子
             if _is_cutting_move(board, r, c, color):
-                value += 0.3
+                value += 0.25
 
             # 5. 如果是急所（双方都想下的点）
             if _is_vital_point(board, r, c):
-                value += 0.2
+                value += 0.15
+            
+            # 6. 靠近对方棋子的位置有额外加分（更容易成为劫材）
+            min_dist_to_opponent = float('inf')
+            for orow, ocol in opponent_stones[:20]:  # 只检查前20个对方棋子，优化性能
+                dist = abs(r - orow) + abs(c - ocol)  # 曼哈顿距离
+                min_dist_to_opponent = min(min_dist_to_opponent, dist)
+            
+            if min_dist_to_opponent <= 2:
+                value += 0.1  # 靠近对方棋子加分
+            elif min_dist_to_opponent <= 4:
+                value += 0.05
 
-            if value >= min_value:
+            # 高优先级劫材降低阈值要求
+            effective_min_value = min_value * 0.5 if is_high_priority else min_value
+            
+            if value >= effective_min_value:
                 threats.append((r, c, value))
 
     # 按价值排序
     threats.sort(key=lambda x: x[2], reverse=True)
     return threats
+
+
+def find_ko_resolution_moves(board: GoBoard, color: Color, ko_position: Tuple[int, int]) -> List[Tuple[int, int, float]]:
+    """
+    查找能够消劫的落子位置
+    
+    消劫的策略（按优先级）：
+    1. 能够提掉对方棋子的位置（直接消劫）
+    2. 能够吃掉对方大块棋子的位置
+    3. 能够制造双打吃（让对方无法兼顾）的位置
+    4. 能够威胁对方龙棋的位置
+    
+    Args:
+        board: 棋盘实例
+        color: 当前要下的一方
+        ko_position: 打劫位置 (row, col)，即对方提劫的位置
+        
+    Returns:
+        消劫选点列表，每个元素为 (row, col, value)，按价值排序
+    """
+    resolutions = []
+    opponent = color.opponent()
+    ko_row, ko_col = ko_position
+    
+    # 获取打劫位置周围的空点（这些是潜在的消劫点）
+    candidates = set()
+    
+    # 1. 打劫位置周围的空点
+    for nr, nc in board.get_neighbors(ko_row, ko_col):
+        if board.get(nr, nc) == Color.EMPTY:
+            candidates.add((nr, nc))
+    
+    # 2. 打劫位置周围对方棋子的气点（可能可以提子消劫）
+    for nr, nc in board.get_neighbors(ko_row, ko_col):
+        if board.get(nr, nc) == opponent:
+            # 获取这个对方棋子的所有气点
+            chain = board.get_chain(nr, nc)
+            liberties = board.get_liberties(nr, nc)
+            for lr, lc in liberties:
+                candidates.add((lr, lc))
+    
+    # 3. 整个棋盘上能够提子的位置（全局搜索）
+    for r in range(board.size):
+        for c in range(board.size):
+            if board.get(r, c) == Color.EMPTY:
+                analysis = board.analyze_move(r, c, color)
+                if analysis['capturing']:
+                    candidates.add((r, c))
+    
+    # 评估每个候选点
+    for r, c in candidates:
+        analysis = board.analyze_move(r, c, color)
+        if analysis['ko'] or analysis['overwrite']:
+            continue
+            
+        value = 0.0
+        
+        # 模拟落子
+        test_board = board.make_move(r, c, color)
+        captured_diff = test_board.get_captures(color) - board.get_captures(color)
+        
+        # 1. 能够提子 - 最高价值
+        if analysis['capturing'] and captured_diff > 0:
+            # 计算被提棋子与打劫位置的距离
+            dist_to_ko = abs(r - ko_row) + abs(c - ko_col)
+            
+            # 基础价值：提子数量
+            base_value = min(captured_diff * 0.15, 0.6)
+            
+            # 距离加成：越靠近打劫位置越好（说明是相关的战斗）
+            if dist_to_ko <= 2:
+                distance_bonus = 0.4  # 紧邻打劫位置，很可能是直接消劫
+            elif dist_to_ko <= 4:
+                distance_bonus = 0.2
+            elif dist_to_ko <= 6:
+                distance_bonus = 0.1
+            else:
+                distance_bonus = 0.0
+            
+            value += base_value + distance_bonus
+            
+        # 2. 能够威胁对方大块棋子（使其只剩1气，即将被吃）
+        threatened_stones = _count_threatened_stones(board, r, c, color)
+        if threatened_stones >= 5:
+            # 威胁的棋子越多，价值越高
+            value += min(threatened_stones * 0.06, 0.5)
+        
+        # 3. 双打吃（同时威胁两处）
+        if _is_double_atari(board, r, c, color):
+            value += 0.3
+        
+        # 4. 破坏对方眼形
+        if _is_eye_breaking_move(board, r, c, color):
+            value += 0.2
+            
+        if value > 0:
+            resolutions.append((r, c, value))
+    
+    # 按价值排序
+    resolutions.sort(key=lambda x: x[2], reverse=True)
+    return resolutions
+
+
+def _is_double_atari(board: GoBoard, row: int, col: int, color: Color) -> bool:
+    """判断是否是双打吃（同时威胁对方两处棋子）"""
+    opponent = color.opponent()
+    atari_count = 0
+    
+    # 检查落子后对方是否有两处棋子只剩1气
+    test_board = board.make_move(row, col, color)
+    
+    # 检查落子位置周围的对方棋子
+    for nr, nc in board.get_neighbors(row, col):
+        if board.get(nr, nc) == opponent:
+            # 获取这个棋子在落子后的气数
+            liberties = test_board.get_liberties(nr, nc)
+            if len(liberties) == 1:
+                atari_count += 1
+    
+    # 如果同时威胁两处或以上，视为双打吃
+    return atari_count >= 2
 
 
 def _count_threatened_stones(board: GoBoard, row: int, col: int, color: Color) -> int:

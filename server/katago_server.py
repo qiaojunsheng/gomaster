@@ -463,10 +463,10 @@ def get_katago_config():
             "maxTime": config.get("maxTime", 5.0),
             "cpuctExploration": config.get("cpuctExploration", 1.2),
             "rootPolicyOptimism": config.get("rootPolicyOptimism", 0.45),
-            "winLossUtilityFactor": config.get("winLossUtilityFactor", 1.0),
-            "staticScoreUtilityFactor": config.get("staticScoreUtilityFactor", 0.1),
-            "dynamicScoreUtilityFactor": config.get("dynamicScoreUtilityFactor", 0.3),
-            "resignThreshold": config.get("resignThreshold", -0.99)
+            "winLossUtilityFactor": config.get("winLossUtilityFactor", 0.5),
+            "staticScoreUtilityFactor": config.get("staticScoreUtilityFactor", 0.5),
+            "dynamicScoreUtilityFactor": config.get("dynamicScoreUtilityFactor", 0.8),
+            "resignThreshold": config.get("resignThreshold", -0.999)
         }
     except Exception as e:
         print(f"[API] 获取KataGo配置失败: {e}")
@@ -477,10 +477,10 @@ def get_katago_config():
             "maxTime": 5.0,
             "cpuctExploration": 1.2,
             "rootPolicyOptimism": 0.45,
-            "winLossUtilityFactor": 1.0,
-            "staticScoreUtilityFactor": 0.1,
-            "dynamicScoreUtilityFactor": 0.3,
-            "resignThreshold": -0.99
+            "winLossUtilityFactor": 0.5,
+            "staticScoreUtilityFactor": 0.5,
+            "dynamicScoreUtilityFactor": 0.8,
+            "resignThreshold": -0.999
         }
 
 

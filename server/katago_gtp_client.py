@@ -556,7 +556,7 @@ class KataGoGTPClient:
                 win_komi: Optional[float] = None) -> Tuple[Optional[int], Optional[int]]:
         if maximize_score:
             actual_max_time = max_time if max_time else 0.8
-            actual_pda = playout_doubling_advantage if playout_doubling_advantage is not None else 1.5
+            actual_pda = playout_doubling_advantage if playout_doubling_advantage is not None else 2.5
 
             # 不设置win_komi，让KataGo自然追求最大目数，不设截止目标
             # 使用标准贴目7.5，不欺骗KataGo
@@ -736,8 +736,8 @@ class KataGoGTPClient:
             
             # 设置PDA让KataGo更积极地追求胜率
             try:
-                # 如果传入了 playout_doubling_advantage 参数，使用传入的值，否则默认1.5
-                pda_value = playout_doubling_advantage if playout_doubling_advantage is not None else 1.5
+                # 如果传入了 playout_doubling_advantage 参数，使用传入的值，否则默认2.5
+                pda_value = playout_doubling_advantage if playout_doubling_advantage is not None else 2.5
                 self.send_command(f'kata-set-param playoutDoublingAdvantage {pda_value}', timeout=1.0)
                 self.send_command(f'kata-set-param playoutDoublingAdvantagePla {"BLACK" if current_color == "B" else "WHITE"}', timeout=1.0)
                 print(f"[KataGo] 设置PDA={pda_value}（积极追求胜率）")
