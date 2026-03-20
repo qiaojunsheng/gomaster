@@ -192,6 +192,7 @@ class GoClient:
         self.monitor_timer_id = None
         self.monitor_interval = 1.0
         self.last_recommended_move = None
+        self.last_last_recommended_move = None  # 上上次推荐位置（用于检测连续相同推荐）
         self.last_recommended_moves = None
         self.last_recommended_move_count = 0
         self.excluded_recommended_moves = []  # 多个推荐落子
@@ -1096,11 +1097,42 @@ class GoClient:
             black_stones = stones.get('black', [])
             white_stones = stones.get('white', [])
 
-            # 保存棋盘信息用于可视化
-            if self.last_stones and stones == self.last_stones and self.last_recommended_move:
-                if self.last_recommended_move not in self.excluded_recommended_moves:
-                    self.excluded_recommended_moves.append(self.last_recommended_move)
-                    print(f"[打劫] 第一次推荐无法落子，判定为打劫位置: {self.last_recommended_move}")
+            # 检查上次推荐的位置是否无法落子（已有棋子），如果是则判定为打劫
+            ko_detected_this_turn = False
+            print(f"[打劫调试] last_recommended_move={self.last_recommended_move}, last_stones={self.last_stones is not None}")
+
+            # 新增：如果连续两次推荐相同位置，判定为打劫（即使位置还没被占用）
+            if self.last_recommended_move and self.last_last_recommended_move:
+                if self.last_recommended_move == self.last_last_recommended_move:
+                    if self.last_recommended_move not in self.excluded_recommended_moves:
+                        self.excluded_recommended_moves.append(self.last_recommended_move)
+                        print(f"[打劫] 连续两次推荐相同位置 {self.last_recommended_move}，判定为打劫位置")
+                        ko_detected_this_turn = True
+
+            if self.last_recommended_move:
+                # 将 GTP 坐标转换为棋盘坐标
+                rec_row, rec_col = self.board_engine.gtp_to_coord(self.last_recommended_move)
+                # 检查该位置是否有棋子
+                rec_pos = (rec_row, rec_col)
+                is_occupied = rec_pos in black_stones or rec_pos in white_stones
+                # 棋盘状态是否变化
+                stones_changed = self.last_stones and stones != self.last_stones
+                print(f"[打劫调试] stones_changed={stones_changed}, last_black={len(self.last_stones.get('black', []) if self.last_stones else [])}, curr_black={len(black_stones)}")
+                # 如果位置已被占用（无法落子），判定为打劫
+                if is_occupied:
+                    if self.last_recommended_move not in self.excluded_recommended_moves:
+                        self.excluded_recommended_moves.append(self.last_recommended_move)
+                        print(f"[打劫] 推荐位置 {self.last_recommended_move} 无法落子，判定为打劫位置")
+                        ko_detected_this_turn = True
+                # 如果棋盘变化了，清空排除列表（打劫已解决或对方已落子）
+                if stones_changed:
+                    if self.excluded_recommended_moves:
+                        print(f"[打劫] 棋盘变化，清空排除列表: {self.excluded_recommended_moves}")
+                        self.excluded_recommended_moves = []
+            
+            # 调试：每帧都打印打劫检测状态
+            if ko_detected_this_turn or self.excluded_recommended_moves:
+                print(f"[打劫调试] excluded_recommended_moves={self.excluded_recommended_moves}, ko_detected={ko_detected_this_turn}")
             
             self.last_stones = stones
             self.last_board_info = {
@@ -1136,7 +1168,7 @@ class GoClient:
                 for ex_move in self.excluded_recommended_moves:
                     row, col = self.board_engine.gtp_to_coord(ex_move)
                     avoid_pos.append({'x': col, 'y': row})
-                print(f"[打劫] 排除位置: {self.excluded_recommended_moves}")
+                print(f"[打劫] 排除位置: {self.excluded_recommended_moves} -> avoid_pos={avoid_pos}")
 
             # 调用分析，传入需要排除的位置
             response = self._request_analysis(black_stones, white_stones, current_color, avoid_positions=avoid_pos)
@@ -1144,6 +1176,9 @@ class GoClient:
             if response and response.get('success'):
                 move = response.get('recommended_move')
                 recommended_moves = response.get('recommended_moves', [])
+                # 记录上上次推荐位置（用于检测连续相同推荐）
+                if self.last_recommended_move:
+                    self.last_last_recommended_move = self.last_recommended_move
                 self.last_recommended_move = move
                 self.last_recommended_moves = recommended_moves
 
@@ -1203,7 +1238,7 @@ class GoClient:
                         
                         # 2. 再查找普通劫材
                         engine_ko_threats = self._get_ko_threats_with_engine(
-                            black_stones, white_stones, current_color, min_value=0.05
+                            black_stones, white_stones, current_color, min_value=0.05, ko_position=ko_coord
                         )
                         if engine_ko_threats:
                             print(f"[打劫] 规则引擎找到 {len(engine_ko_threats)} 个劫材")
@@ -1212,43 +1247,24 @@ class GoClient:
                     except Exception as e:
                         print(f"[打劫] 规则引擎查找劫材失败: {e}")
 
-                    # 打劫时显示打劫位置和替代方案（更规范整齐的格式）
-                    msg_lines = ["╔════════════════════════════════════╗"]
-                    msg_lines.append(f"║  ⚠️ 打劫警告  🚫 禁止落子: {potential_ko_move:<8}  ║")
-                    msg_lines.append("╠════════════════════════════════════╣")
-
-                    # 显示消劫选点（最高优先级）
-                    if ko_resolution_moves:
-                        msg_lines.append("║  🔥 消劫选点（可提子消劫）:        ║")
-                        for i, (row, col, value) in enumerate(ko_resolution_moves[:2]):
+                    # 打劫时简化显示：只显示劫材位置
+                    ko_threats_list = []
+                    
+                    # 合并KataGo推荐的劫材和规则引擎找到的劫材
+                    for am in ko_alternative_moves[:3]:
+                        if am['move'] not in ko_threats_list:
+                            ko_threats_list.append(am['move'])
+                    
+                    if engine_ko_threats:
+                        for row, col, value in engine_ko_threats[:3]:
                             gtp = self.board_engine.coord_to_gtp(row, col)
-                            action = "提子消劫!" if value > 0.8 else "可提子"
-                            msg_lines.append(f"║     {'🔴' if i==0 else '🟢'} {gtp:<6} 价值:{value:.2f} {action:<8} ║")
-                        msg_lines.append("╠════════════════════════════════════╣")
-
-                    # 显示替代位置（劫材）- 合并KataGo推荐和规则引擎结果
-                    if ko_alternative_moves or engine_ko_threats:
-                        msg_lines.append("║  💡 推荐劫材:                      ║")
-
-                        # 显示KataGo推荐的劫材（带胜率）
-                        for i, am in enumerate(ko_alternative_moves[:3]):
-                            circle = ['🔴', '🟢', '🟡'][i] if i < 3 else '⚪'
-                            msg_lines.append(f"║     {circle} {am['move']:<6} 胜率:{am['winrate']:>6.1f}%   ║")
-
-                        # 显示规则引擎找到的额外劫材（带价值评估）
-                        if engine_ko_threats:
-                            msg_lines.append("║  📊 规则引擎评估:                  ║")
-                            for i, (row, col, value) in enumerate(engine_ko_threats[:3]):
-                                gtp = self.board_engine.coord_to_gtp(row, col)
-                                # 避免重复显示
-                                if not any(am['move'] == gtp for am in ko_alternative_moves[:3]):
-                                    stars = '★' * int(value * 5)  # 0-5星评级
-                                    msg_lines.append(f"║     {gtp:<6} 价值:{value:.2f} {stars:<5}   ║")
-                    elif not ko_resolution_moves:
-                        msg_lines.append("║  (暂无推荐劫材)                    ║")
-
-                    msg_lines.append("╚════════════════════════════════════╝")
-                    msg = "\n".join(msg_lines)
+                            if gtp not in ko_threats_list:
+                                ko_threats_list.append(gtp)
+                    
+                    if ko_threats_list:
+                        msg = f"💡 推荐劫材: {', '.join(ko_threats_list[:3])}"
+                    else:
+                        msg = "💡 暂无推荐劫材"
                     
                     # 更新轮到显示
                     self.root.after(0, lambda: self.turn_label.config(text=t('my_turn'), fg=self.COLORS['success']))
@@ -1322,16 +1338,26 @@ class GoClient:
 
                 # 显示可视化棋盘（增量更新）
                 if self.show_visualization.get():
-                    ko_move = potential_ko_move if is_ko else None
-                    # 构建candidate_moves：第一个是打劫位置，后面是劫材
+                    # 构建candidate_moves：只显示劫材位置（不显示打劫位置）
                     if is_ko:
-                        candidate_moves = [{'move': potential_ko_move, 'winrate': 0}]  # 打劫位置
-                        candidate_moves.extend(ko_alternative_moves)  # 添加劫材
+                        candidate_moves = []
+                        # 添加KataGo推荐的劫材
+                        for am in ko_alternative_moves[:3]:
+                            if not any(cm['move'] == am['move'] for cm in candidate_moves):
+                                candidate_moves.append(am)
+                        # 添加规则引擎找到的劫材（转换为move格式）
+                        if engine_ko_threats:
+                            for row, col, value in engine_ko_threats[:3]:
+                                gtp = self.board_engine.coord_to_gtp(row, col)
+                                if not any(cm['move'] == gtp for cm in candidate_moves):
+                                    candidate_moves.append({'move': gtp, 'winrate': value * 100})
                         # 保存劫材信息用于后续可视化开关切换
                         self.last_ko_candidate_moves = candidate_moves.copy()
+                        ko_move = None  # 不显示打劫位置
                     else:
                         candidate_moves = None
                         self.last_ko_candidate_moves = None
+                        ko_move = None
                     # 使用默认参数捕获当前值，避免lambda延迟绑定问题
                     self.root.after(0, lambda s=stones, km=ko_move, cm=candidate_moves: self._show_board_visualization(s, ko_move=km, candidate_moves=cm))
 
@@ -1384,7 +1410,7 @@ class GoClient:
                 'max_time': self.config.get('max_time', 5.0),
                 'max_visits': self.config.get('max_visits', 5000),
                 # 白棋使用更高的PDA来对抗黑棋先手优势
-                'playout_doubling_advantage': 2.6 if current_color == 'W' else 1.5,
+                'playout_doubling_advantage': 2.5,  # 双方使用相同的极端杀棋PDA
                 'fast_mode': False  # 快棋模式已移除，始终使用普通模式
             }
 
@@ -1495,7 +1521,7 @@ class GoClient:
 
         return {'is_ko': False}
 
-    def _get_ko_threats_with_engine(self, black_stones: list, white_stones: list, current_color: str, min_value: float = 0.2) -> List[Tuple[int, int, float]]:
+    def _get_ko_threats_with_engine(self, black_stones: list, white_stones: list, current_color: str, min_value: float = 0.2, ko_position: Tuple[int, int] = None) -> List[Tuple[int, int, float]]:
         """
         使用规则引擎查找劫材（Sabaki 风格）
 
@@ -1504,6 +1530,7 @@ class GoClient:
             white_stones: 白棋位置列表
             current_color: 当前要下的一方 ('B' 或 'W')
             min_value: 最小劫材价值
+            ko_position: 特定的打劫位置，用于优先查找相关的劫材
 
         Returns:
             劫材列表，每个元素为 (row, col, value)
@@ -1513,7 +1540,7 @@ class GoClient:
 
         # 查找劫材
         color = Color.BLACK if current_color == 'B' else Color.WHITE
-        return find_ko_threats(board, color, min_value=min_value)
+        return find_ko_threats(board, color, min_value=min_value, ko_position=ko_position)
 
     def _auto_click(self, gtp_coord: str):
         """自动落子"""
@@ -2355,18 +2382,19 @@ class GoClient:
                             x = margin + col * cell_size
                             y = margin + row * cell_size
                             color = ko_colors[i] if i < len(ko_colors) else 'gray'
-                            # 彩色圆圈标记（与推荐位置一样）
-                            self.board_canvas.create_oval(
-                                x-stone_radius*0.85, y-stone_radius*0.85,
-                                x+stone_radius*0.85, y+stone_radius*0.85,
+                            # 彩色三角形标记劫材位置
+                            self.board_canvas.create_polygon(
+                                x, y - stone_radius * 0.9,  # 顶点
+                                x - stone_radius * 0.75, y + stone_radius * 0.5,  # 左下
+                                x + stone_radius * 0.75, y + stone_radius * 0.5,  # 右下
                                 fill=color, outline='black', width=2, tags="candidate"
                             )
-                            # 在圆圈内显示序号
+                            # 在三角形内显示序号
                             text_color = 'white' if color in ['red', 'green'] else 'black'
-                            self.board_canvas.create_text(x, y, text=str(i+1), fill=text_color, 
+                            self.board_canvas.create_text(x, y + stone_radius*0.1, text=str(i+1), fill=text_color, 
                                                          font=('Arial', 12, 'bold'), tags="candidate")
-                            # 在圆圈上方显示胜率
-                            self.board_canvas.create_text(x, y - stone_radius*1.1, 
+                            # 在三角形上方显示胜率
+                            self.board_canvas.create_text(x, y - stone_radius*1.2, 
                                                          text=f"{winrate:.1f}%", 
                                                          fill=color, 
                                                          font=('Arial', 9, 'bold'), 
@@ -2395,6 +2423,38 @@ class GoClient:
                         # 在三角形内显示禁止符号
                         self.board_canvas.create_text(x, y, text='🚫', fill='white', 
                                                      font=('Arial', 10, 'bold'), tags="ko_marker")
+                    except (ValueError, IndexError, NameError):
+                        pass
+            # 显示劫材位置（打劫时ko_move为None，但candidate_moves有值）
+            elif candidate_moves and len(candidate_moves) > 0:
+                # 颜色顺序：红(第1)、绿(第2)、黄(第3)
+                ko_colors = ['red', 'green', 'yellow']
+                
+                for i, m in enumerate(candidate_moves[:3]):  # 显示前3个劫材
+                    try:
+                        move = m['move'] if isinstance(m, dict) else m
+                        winrate = m.get('winrate', 0) if isinstance(m, dict) else 0
+                        if move == 'PASS' or len(move) < 2:
+                            continue
+                        col_char = move[0].upper()
+                        row_num = int(move[1:])
+                        col = ord(col_char) - ord('A')
+                        if col >= 8:
+                            col -= 1
+                        row = 19 - row_num
+                        x = margin + col * cell_size
+                        y = margin + row * cell_size
+                        color = ko_colors[i] if i < len(ko_colors) else 'gray'
+                        # 彩色圆圈标记劫材位置
+                        self.board_canvas.create_oval(
+                            x-stone_radius*0.85, y-stone_radius*0.85,
+                            x+stone_radius*0.85, y+stone_radius*0.85,
+                            fill=color, outline='black', width=2, tags="candidate"
+                        )
+                        # 在圆圈内显示序号
+                        text_color = 'white' if color in ['red', 'green'] else 'black'
+                        self.board_canvas.create_text(x, y, text=str(i+1), fill=text_color, 
+                                                     font=('Arial', 12, 'bold'), tags="candidate")
                     except (ValueError, IndexError, NameError):
                         pass
             # 标记推荐落子（非打劫时）

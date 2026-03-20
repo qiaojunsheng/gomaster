@@ -22,7 +22,7 @@ checkpoint_path = args["checkpoint"]
 output_json_to = args["output_json_to"]
 overwrite_checkpoint_from_json = args["overwrite_checkpoint_from_json"]
 
-data = torch.load(checkpoint_path,map_location="cpu")
+data = katago.train.load_model.load_checkpoint(checkpoint_path)
 
 if output_json_to is not None:
     assert output_json_to.endswith(".json")
@@ -32,7 +32,7 @@ if output_json_to is not None:
         config = data["config"] if "config" in data else None,
     )
     with open(output_json_to,"w") as f:
-        json.dump(data,f,indent=2,default=repr)
+        json.dump(data_to_write,f,indent=2,default=repr)
     print(f"Dumped to {output_json_to}")
 
 elif overwrite_checkpoint_from_json:

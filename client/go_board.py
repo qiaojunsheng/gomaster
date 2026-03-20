@@ -476,7 +476,7 @@ class GoBoard:
 # 增强打劫检测和劫材查找功能（基于 Sabaki 风格）
 # =========================================================================
 
-def find_ko_threats(board: GoBoard, color: Color, min_value: float = 0.1) -> List[Tuple[int, int, float]]:
+def find_ko_threats(board: GoBoard, color: Color, min_value: float = 0.1, ko_position: Tuple[int, int] = None) -> List[Tuple[int, int, float]]:
     """
     查找可能的劫材位置 - 优化版
     基于 Sabaki 风格的棋盘分析
@@ -492,6 +492,7 @@ def find_ko_threats(board: GoBoard, color: Color, min_value: float = 0.1) -> Lis
         board: 棋盘实例
         color: 当前要下的一方
         min_value: 最小劫材价值（0-1之间）
+        ko_position: 特定的打劫位置，用于优先查找相关的劫材
 
     Returns:
         劫材列表，每个元素为 (row, col, value)，按价值排序
@@ -559,6 +560,19 @@ def find_ko_threats(board: GoBoard, color: Color, min_value: float = 0.1) -> Lis
                 value += 0.1  # 靠近对方棋子加分
             elif min_dist_to_opponent <= 4:
                 value += 0.05
+
+            # 7. 如果提供了打劫位置，计算到打劫位置的距离
+            # 距离打劫位置近的劫材更有价值（劫材必须足够大）
+            if ko_position:
+                ko_row, ko_col = ko_position
+                dist_to_ko = abs(r - ko_row) + abs(c - ko_col)
+                # 距离越近加分越高，但太近可能无效（可能是打劫位置本身或相邻）
+                if 1 <= dist_to_ko <= 3:
+                    value += 0.3  # 紧邻打劫位置的劫材价值高
+                elif 4 <= dist_to_ko <= 6:
+                    value += 0.15
+                elif 7 <= dist_to_ko <= 10:
+                    value += 0.05
 
             # 高优先级劫材降低阈值要求
             effective_min_value = min_value * 0.5 if is_high_priority else min_value

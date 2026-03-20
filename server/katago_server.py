@@ -98,7 +98,13 @@ class ServerState:
         return models
         
     def _get_b28_model(self, models: List[Dict[str, str]]) -> Dict[str, str]:
-        """获取b28模型，如果没有则返回b18，再没有则返回第一个"""
+        """获取b28模型，如果没有则返回b18，再没有则返回第一个
+        优先选择 s12674021632 版本（最新最大的b28模型）"""
+        # 首先尝试找 s12674021632 版本（优先）
+        for m in models:
+            if 's12674021632' in m['name']:
+                return m
+        # 然后尝试找其他b28模型
         for m in models:
             if 'b28' in m['name']:
                 return m
@@ -225,7 +231,7 @@ class ServerState:
                     avoid_positions = request.avoid_positions
 
                     # 准备PDA参数
-                    pda_value = request.playout_doubling_advantage if request.playout_doubling_advantage is not None else 1.5
+                    pda_value = request.playout_doubling_advantage if request.playout_doubling_advantage is not None else 2.5
 
                     if avoid_positions:
                         # 转换为 (row, col) 格式

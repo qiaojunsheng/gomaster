@@ -139,11 +139,11 @@ class KataGoGTPClient:
             self.response_thread.start()
             
             # 等待 KataGo 初始化（给时间让后端检测完成）
-            time.sleep(2)  # 快棋模式：减少等待时间
+            time.sleep(5)  # 增加等待时间，确保KataGo完全启动
             
             # 如果还没有检测到后端，再等待一下
             if self.backend_detected is None:
-                time.sleep(1)
+                time.sleep(3)
                 if self.backend_detected is None:
                     print(f"[KataGo] ⚠️  未能从启动输出中检测到后端类型")
                     print(f"[KataGo] 提示: 请检查KataGo是否编译时启用了Metal后端")
@@ -566,7 +566,9 @@ class KataGoGTPClient:
             if max_visits is not None:
                 self.send_command(f'kata-set-param maxVisits {max_visits}', timeout=1.0)
             self.send_command(f'kata-set-param playoutDoublingAdvantage {actual_pda}', timeout=1.0)
-            self.send_command(f'kata-set-param playoutDoublingAdvantagePla {"BLACK" if color == "B" else "WHITE"}', timeout=1.0)
+            # 对双方都使用平衡激进配置
+            self.send_command(f'kata-set-param playoutDoublingAdvantagePla BLACK', timeout=1.0)
+            self.send_command(f'kata-set-param playoutDoublingAdvantagePla WHITE', timeout=1.0)
 
             # 使用更合理的超时时间：max_time + 5秒缓冲，确保KataGo有足够时间完成计算
             timeout_value = actual_max_time + 5.0
@@ -736,17 +738,15 @@ class KataGoGTPClient:
             
             # 设置PDA让KataGo更积极地追求胜率
             try:
-                # 如果传入了 playout_doubling_advantage 参数，使用传入的值，否则默认2.5
+                # 如果传入了 playout_doubling_advantage 参数，使用传入的值，否则默认2.5（极端杀棋）
                 pda_value = playout_doubling_advantage if playout_doubling_advantage is not None else 2.5
                 self.send_command(f'kata-set-param playoutDoublingAdvantage {pda_value}', timeout=1.0)
-                self.send_command(f'kata-set-param playoutDoublingAdvantagePla {"BLACK" if current_color == "B" else "WHITE"}', timeout=1.0)
-                print(f"[KataGo] 设置PDA={pda_value}（积极追求胜率）")
+                # 对双方都使用激进配置，确保无论执黑执白都保持攻击性
+                self.send_command(f'kata-set-param playoutDoublingAdvantagePla BLACK', timeout=1.0)
+                self.send_command(f'kata-set-param playoutDoublingAdvantagePla WHITE', timeout=1.0)
+                print(f"[KataGo] 设置PDA={pda_value}（平衡激进，稳定赢棋）")
             except Exception as e:
                 print(f"[KataGo] ⚠️ 设置PDA失败: {e}")
-            
-            # 轮巡间隔时间0.2秒（20 centiseconds）
-            # interval 单位是百分之一秒（centiseconds），20 = 0.2秒
-            analyze_command = f'kata-analyze {current_color} interval 20 maxmoves {max_moves} rootInfo true'
             
             # 处理排除位置（支持单个或多个位置）
             positions_to_avoid = []
@@ -757,7 +757,9 @@ class KataGoGTPClient:
                 # 兼容旧的avoid_position参数
                 positions_to_avoid = [avoid_position]
             
-            # 如果指定了要排除的位置（用于打劫），添加到命令中
+            # 构建命令：avoid参数必须在其他参数之前
+            # kata-analyze PLAYER [avoid PLAYER VERTEX... [DEPTH]] [interval I] [maxmoves N] [rootInfo true]
+            avoid_str = ""
             if positions_to_avoid:
                 # 转换为GTP格式并去重
                 avoid_gtp_list = []
@@ -771,9 +773,12 @@ class KataGoGTPClient:
                 if avoid_gtp_list:
                     # avoid PLAYER VERTEX,VERTEX,... UNTILDEPTH
                     # UNTILDEPTH 设置为一个较大的值（如100）以确保在整个搜索深度中都排除该位置
-                    avoid_str = ','.join(avoid_gtp_list)
-                    analyze_command += f' avoid {current_color} {avoid_str} 100'
-                    print(f"[KataGo] 排除位置: {avoid_str} (共{len(avoid_gtp_list)}个位置)")
+                    avoid_str = f' avoid {current_color} {",".join(avoid_gtp_list)} 100'
+                    print(f"[KataGo] 排除位置: {','.join(avoid_gtp_list)} (共{len(avoid_gtp_list)}个位置)")
+            
+            # 轮巡间隔时间0.2秒（20 centiseconds）
+            # interval 单位是百分之一秒（centiseconds），20 = 0.2秒
+            analyze_command = f'kata-analyze {current_color}{avoid_str} interval 20 maxmoves {max_moves} rootInfo true'
             
             import random
             command_id = random.randint(1, 999999)
